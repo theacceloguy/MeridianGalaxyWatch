@@ -1,0 +1,647 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Meridian — read the night sky</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    /* Dark because astronomy tools are used at night — this preserves dark adaptation.
+       The red accent is the same reason red torches exist at a star party. */
+    --void:#05060a;
+    --panel:#0b0e15;
+    --line:#1b2130;
+    --halo:#cdd6e6;
+    --dim:#6d788d;
+    --signal:#ff3b2f;
+
+    /* Object hues encode physics, not decoration:
+       galaxy = integrated starlight (yellow-gold), nebula = H-alpha (red-pink),
+       cluster / star = hot blue-white, planet = reflected sunlight (pale) */
+    --k-galaxy:#f3c56b;
+    --k-nebula:#ff7093;
+    --k-cluster:#8fd8ff;
+    --k-star:#a9bcff;
+    --k-planet:#dfe6f2;
+    --k-other:#7a869b;
+
+    --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --display:"Bricolage Grotesque",var(--sans);
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--void);
+    color:var(--halo);
+    font-family:var(--sans);
+    font-size:17px;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+
+  /* The galaxy field is the page background and the app's working surface —
+     it dims when there is data to read. */
+  #sky{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0}
+  #vignette{
+    position:fixed;inset:0;z-index:1;pointer-events:none;
+    background:radial-gradient(120% 90% at 50% 40%,transparent 30%,rgba(5,6,10,.75) 100%);
+  }
+
+  .shell{position:relative;z-index:2;max-width:1120px;margin:0 auto;padding:20px 20px 64px;
+         min-height:100svh;display:flex;flex-direction:column}
+
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;padding-bottom:8px}
+  .mark{font-family:var(--display);font-weight:700;font-size:19px;letter-spacing:.06em;
+        text-transform:uppercase}
+  .mark span{color:var(--signal)}
+  .role{font-family:var(--mono);font-size:12.5px;color:var(--dim)}
+
+  main{flex:1;display:flex;flex-direction:column;justify-content:center;padding:36px 0}
+
+  /* ---------- intro ---------- */
+  h1{
+    font-family:var(--display);font-weight:700;
+    font-size:clamp(2.4rem,7.5vw,4.6rem);
+    line-height:1.02;letter-spacing:-.025em;margin:0 0 18px;max-width:16ch;
+  }
+  .lede{max-width:56ch;color:#aab5c7;margin:0 0 32px;font-size:1.0625rem}
+
+  .actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  button{font:inherit;cursor:pointer}
+  .btn{
+    border:1px solid var(--line);background:var(--panel);color:var(--halo);
+    padding:13px 22px;border-radius:2px;font-size:16px;font-weight:500;
+    transition:border-color .18s,color .18s,transform .18s;
+  }
+  .btn:hover{border-color:#39445a}
+  .btn-primary{border-color:var(--signal);color:#fff;background:rgba(255,59,47,.09)}
+  .btn-primary:hover{background:rgba(255,59,47,.16)}
+  .btn:active{transform:translateY(1px)}
+  :focus-visible{outline:2px solid var(--signal);outline-offset:3px}
+
+  .note-field{margin-top:26px;max-width:52ch}
+  .note-field label{display:block;font-family:var(--mono);font-size:12.5px;color:var(--dim);
+                    margin-bottom:7px;letter-spacing:.02em}
+  .note-field input{
+    width:100%;background:rgba(11,14,21,.7);border:1px solid var(--line);color:var(--halo);
+    padding:11px 13px;border-radius:2px;font-family:var(--mono);font-size:14px;
+  }
+  .note-field input::placeholder{color:#4c5566}
+  .note-field input:focus{border-color:#39445a;outline:none}
+
+  .howto{margin-top:34px;font-family:var(--mono);font-size:12.5px;color:var(--dim);
+         max-width:60ch;line-height:1.9}
+
+  /* ---------- reticle / working ---------- */
+  .frame-wrap{position:relative;width:100%;max-width:760px}
+  .reticle{position:relative;width:100%;background:#000;border:1px solid var(--line);
+           overflow:hidden;aspect-ratio:4/3}
+  .reticle img{width:100%;height:100%;object-fit:contain;display:block}
+  .corner{position:absolute;width:22px;height:22px;border:1px solid rgba(255,255,255,.55);pointer-events:none}
+  .c-tl{top:9px;left:9px;border-right:0;border-bottom:0}
+  .c-tr{top:9px;right:9px;border-left:0;border-bottom:0}
+  .c-bl{bottom:9px;left:9px;border-right:0;border-top:0}
+  .c-br{bottom:9px;right:9px;border-left:0;border-top:0}
+
+  .sweep{position:absolute;left:0;right:0;height:2px;background:var(--signal);
+         box-shadow:0 0 22px 4px rgba(255,59,47,.55);opacity:.9;
+         animation:sweep 2.1s cubic-bezier(.5,0,.5,1) infinite}
+  @keyframes sweep{0%{top:-2px}100%{top:100%}}
+
+  .status{margin-top:18px;font-family:var(--mono);font-size:13px;color:var(--dim);
+          min-height:96px}
+  .status div{opacity:0;animation:fade .4s forwards}
+  .status div.done::before{content:"✓ ";color:var(--signal)}
+  .status div.wait::before{content:"· ";color:var(--dim)}
+  @keyframes fade{to{opacity:1}}
+
+  /* ---------- results ---------- */
+  .result-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:34px;align-items:start}
+  @media (max-width:860px){.result-grid{grid-template-columns:1fr;gap:26px}}
+
+  .marker{position:absolute;width:44px;height:44px;margin:-22px 0 0 -22px;background:none;
+          border:0;padding:0;display:grid;place-items:center}
+  .marker i{width:13px;height:13px;border-radius:50%;border:1.5px solid currentColor;
+            display:block;transition:transform .18s;box-shadow:0 0 12px currentColor}
+  .marker:hover i,.marker.on i{transform:scale(1.85)}
+  .marker b{
+    position:absolute;left:26px;top:50%;transform:translateY(-50%);
+    font-family:var(--mono);font-size:11.5px;font-weight:500;white-space:nowrap;
+    padding:2px 6px;background:rgba(5,6,10,.82);border:1px solid currentColor;letter-spacing:.02em;
+  }
+  .marker.flip b{left:auto;right:26px}
+
+  .summary{margin:0 0 22px;color:#aab5c7;max-width:46ch}
+  .obj{border-top:1px solid var(--line);padding:16px 0;cursor:pointer;display:block;width:100%;
+       text-align:left;background:none;color:inherit;transition:background .15s}
+  .obj:hover,.obj.on{background:rgba(255,255,255,.028)}
+  .obj-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .cat{font-family:var(--mono);font-size:19px;font-weight:500}
+  .common{color:var(--dim);font-size:14.5px}
+  .kind{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;
+        padding:2px 7px;border:1px solid currentColor;margin-left:auto}
+  .detail{font-size:14.5px;color:#96a2b5;margin:6px 0 10px;line-height:1.55}
+  .conf{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+  .bar{flex:1;max-width:190px;height:2px;background:var(--line)}
+  .bar i{display:block;height:100%;background:currentColor}
+
+  .caveat{margin-top:26px;padding-top:16px;border-top:1px solid var(--line);
+          font-size:14px;color:var(--dim);max-width:52ch;line-height:1.6}
+  .empty{border:1px solid var(--line);padding:22px;max-width:52ch}
+  .empty h3{font-family:var(--display);margin:0 0 8px;font-size:1.25rem;font-weight:500}
+  .empty p{margin:0 0 16px;color:var(--dim);font-size:15px}
+  .empty details{font-family:var(--mono);font-size:12.5px;color:var(--dim)}
+  .empty summary{cursor:pointer;color:var(--signal)}
+  .empty pre{white-space:pre-wrap;word-break:break-word;margin:10px 0 0;padding:10px;
+             background:rgba(0,0,0,.4);border:1px solid var(--line);color:#8a94a6;
+             font-size:11.5px;line-height:1.5;max-height:180px;overflow:auto}
+
+  footer{font-family:var(--mono);font-size:12px;color:#414b5c;padding-top:22px}
+
+  .hidden{display:none!important}
+  @media (prefers-reduced-motion:reduce){
+    .sweep{animation:none;top:50%}
+    .status div{animation:none;opacity:1}
+  }
+  @media (max-width:640px){
+    body{font-size:16px}
+    .shell{padding:16px 16px 48px}
+    .actions .btn{flex:1 1 100%;text-align:center}
+  }
+</style>
+
+<canvas id="sky"></canvas>
+<div id="vignette"></div>
+
+<div class="shell">
+  <header>
+    <div class="mark">Meri<span>d</span>ian</div>
+    <div class="role">sky reader · v0.4</div>
+  </header>
+
+  <main>
+    <!-- INTRO -->
+    <section id="intro">
+      <h1>What did you photograph?</h1>
+      <p class="lede">Load a photo of the night sky. Meridian names the galaxies, nebulae, clusters and
+        bright stars in the frame, marks where each one sits, and tells you how sure it is.</p>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="pick">Choose a photo</button>
+        <button class="btn" id="shoot">Take a photo</button>
+      </div>
+
+      <div class="note-field">
+        <label for="note">Anything about the shot? Optional, but it sharpens the read.</label>
+        <input id="note" placeholder="70mm, 8s exposure, facing south from Bangkok" autocomplete="off">
+      </div>
+
+      <p class="howto">Works on a phone snapshot, a tracked exposure, or a photo through an eyepiece.<br>
+        Blurry, over-exposed and city-sky frames are fine — you'll just get fewer objects back.</p>
+    </section>
+
+    <!-- WORKING -->
+    <section id="working" class="hidden">
+      <div class="frame-wrap">
+        <div class="reticle">
+          <img id="work-img" alt="The photo being read">
+          <div class="sweep"></div>
+          <span class="corner c-tl"></span><span class="corner c-tr"></span>
+          <span class="corner c-bl"></span><span class="corner c-br"></span>
+        </div>
+        <div class="status" id="status"></div>
+      </div>
+    </section>
+
+    <!-- RESULTS -->
+    <section id="result" class="hidden">
+      <div class="result-grid">
+        <div class="frame-wrap">
+          <div class="reticle" id="plate">
+            <img id="res-img" alt="Your photo with each identified object marked">
+            <span class="corner c-tl"></span><span class="corner c-tr"></span>
+            <span class="corner c-bl"></span><span class="corner c-br"></span>
+          </div>
+        </div>
+
+        <div>
+          <p class="summary" id="summary"></p>
+          <div id="objects"></div>
+          <div id="empty-state"></div>
+          <p class="caveat" id="caveat"></p>
+          <div class="actions" style="margin-top:22px">
+            <button class="btn btn-primary" id="again">Read another photo</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>Positions are the model's read of your frame, not an astrometric solve.</footer>
+</div>
+
+<input type="file" id="file-pick" accept="image/*" class="hidden">
+<input type="file" id="file-shoot" accept="image/*" capture="environment" class="hidden">
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* ------------------------------------------------------------------
+   1. THE FIELD — a grand-design spiral rendered in points.
+------------------------------------------------------------------ */
+(function galaxy(){
+  if (typeof THREE === 'undefined') return;
+  const canvas = document.getElementById('sky');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+
+  const scene  = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 0.1, 300);
+  camera.position.set(0, 3.4, 9.6);
+
+  const group = new THREE.Group();
+  scene.add(group);
+
+  // --- disc particles
+  const COUNT = 22000, ARMS = 2, RADIUS = 9, SPIN = 1.15, SCATTER = 0.42, POW = 2.6;
+  const pos = new Float32Array(COUNT*3);
+  const col = new Float32Array(COUNT*3);
+  const rnd = new Float32Array(COUNT);
+
+  const core = new THREE.Color('#ffd9a8');   // old, cool, dense population
+  const mid  = new THREE.Color('#ff8f6b');
+  const rim  = new THREE.Color('#5b7dff');   // young hot stars in the arms
+
+  for (let i=0;i<COUNT;i++){
+    const i3 = i*3;
+    const r  = Math.pow(Math.random(), 0.62) * RADIUS;
+    const arm = (i % ARMS) / ARMS * Math.PI * 2;
+    const angle = arm + r * SPIN;
+
+    const s = SCATTER * (0.35 + r/RADIUS);
+    const jx = Math.pow(Math.random(),POW)*(Math.random()<.5?1:-1)*s;
+    const jy = Math.pow(Math.random(),POW)*(Math.random()<.5?1:-1)*s*0.34;
+    const jz = Math.pow(Math.random(),POW)*(Math.random()<.5?1:-1)*s;
+
+    pos[i3]   = Math.cos(angle)*r + jx;
+    pos[i3+1] = jy + Math.exp(-r*1.6)*0.55;      // bulge thickens toward the core
+    pos[i3+2] = Math.sin(angle)*r + jz;
+
+    const t = r/RADIUS;
+    const c = core.clone().lerp(mid, Math.min(t*1.8,1)).lerp(rim, Math.pow(t,1.4));
+    col[i3]=c.r; col[i3+1]=c.g; col[i3+2]=c.b;
+    rnd[i] = Math.random();
+  }
+
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  g.setAttribute('color',    new THREE.BufferAttribute(col,3));
+  g.setAttribute('aRnd',     new THREE.BufferAttribute(rnd,1));
+
+  const uniforms = {
+    uSize:{value: 15.0 * Math.min(devicePixelRatio,2)},
+    uTime:{value: 0},
+    uFade:{value: 1.0},
+    uWarp:{value: 0.0}
+  };
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms,
+    transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, vertexColors:true,
+    vertexShader:`
+      uniform float uSize; uniform float uTime; uniform float uWarp;
+      attribute float aRnd; varying vec3 vCol; varying float vRnd;
+      void main(){
+        vCol = color; vRnd = aRnd;
+        vec3 p = position;
+        p.y += sin(uTime*0.25 + aRnd*6.283) * 0.035;
+        vec4 mv = modelViewMatrix * vec4(p,1.0);
+        gl_Position = projectionMatrix * mv;
+        float tw = 0.72 + 0.28 * sin(uTime*1.6 + aRnd*40.0);
+        gl_PointSize = uSize * (1.0 + uWarp*2.2) * tw * (1.0/-mv.z);
+      }`,
+    fragmentShader:`
+      uniform float uFade; varying vec3 vCol; varying float vRnd;
+      void main(){
+        float d = length(gl_PointCoord - 0.5);
+        float a = smoothstep(0.5, 0.02, d);
+        a *= a;
+        gl_FragColor = vec4(vCol, a * uFade * (0.45 + vRnd*0.55));
+      }`
+  });
+
+  const disc = new THREE.Points(g, mat);
+  group.add(disc);
+
+  // --- distant field, so the disc has something to sit in
+  const SC = 2600, sp = new Float32Array(SC*3), scv = new Float32Array(SC*3);
+  const white = new THREE.Color('#dfe6f7'), blue = new THREE.Color('#7f9cff');
+  for(let i=0;i<SC;i++){
+    const i3=i*3, R = 40 + Math.random()*90;
+    const th = Math.random()*Math.PI*2, ph = Math.acos(2*Math.random()-1);
+    sp[i3]=R*Math.sin(ph)*Math.cos(th); sp[i3+1]=R*Math.cos(ph); sp[i3+2]=R*Math.sin(ph)*Math.sin(th);
+    const c = white.clone().lerp(blue, Math.random());
+    scv[i3]=c.r; scv[i3+1]=c.g; scv[i3+2]=c.b;
+  }
+  const sg = new THREE.BufferGeometry();
+  sg.setAttribute('position', new THREE.BufferAttribute(sp,3));
+  sg.setAttribute('color',    new THREE.BufferAttribute(scv,3));
+  scene.add(new THREE.Points(sg, new THREE.PointsMaterial({
+    size:0.42, sizeAttenuation:true, vertexColors:true, transparent:true, opacity:.75, depthWrite:false
+  })));
+
+  // --- interaction: slight parallax from pointer or device tilt
+  let px=0, py=0, tx=0, ty=0;
+  addEventListener('pointermove', e => {
+    tx = (e.clientX/innerWidth  - .5) * 1.5;
+    ty = (e.clientY/innerHeight - .5) * 0.9;
+  }, {passive:true});
+  addEventListener('deviceorientation', e => {
+    if (e.gamma==null) return;
+    tx = Math.max(-1.5, Math.min(1.5, e.gamma/32));
+    ty = Math.max(-0.9, Math.min(0.9, (e.beta-45)/55));
+  }, {passive:true});
+
+  // --- state driven by the app: 'idle' | 'dive' | 'read'
+  const VIEWS = {
+    idle: {pos:new THREE.Vector3(0,3.4,9.6),  fade:1.00, warp:0},
+    dive: {pos:new THREE.Vector3(0,0.9,3.2),  fade:1.00, warp:1},
+    read: {pos:new THREE.Vector3(0,5.2,13.5), fade:0.30, warp:0}
+  };
+  let view = VIEWS.idle;
+  window.setSkyView = k => { view = VIEWS[k] || VIEWS.idle; };
+
+  const clock = new THREE.Clock();
+  (function loop(){
+    requestAnimationFrame(loop);
+    const t = clock.getElapsedTime();
+    uniforms.uTime.value = t;
+    if (!reduced) group.rotation.y = t * (0.028 + uniforms.uWarp.value * 0.5);
+
+    uniforms.uFade.value += (view.fade - uniforms.uFade.value) * 0.045;
+    uniforms.uWarp.value += (view.warp - uniforms.uWarp.value) * 0.05;
+
+    px += (tx-px)*0.045; py += (ty-py)*0.045;
+    camera.position.x += (view.pos.x + px - camera.position.x) * 0.045;
+    camera.position.y += (view.pos.y - py - camera.position.y) * 0.045;
+    camera.position.z += (view.pos.z - camera.position.z) * 0.045;
+    camera.lookAt(0,0,0);
+    renderer.render(scene, camera);
+  })();
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+})();
+
+/* ------------------------------------------------------------------
+   2. THE READ — image in, identified objects out.
+------------------------------------------------------------------ */
+const $ = id => document.getElementById(id);
+const KIND_COLOR = {
+  galaxy:'var(--k-galaxy)', nebula:'var(--k-nebula)', cluster:'var(--k-cluster)',
+  star:'var(--k-star)', planet:'var(--k-planet)', moon:'var(--k-planet)'
+};
+const show = name => {
+  ['intro','working','result'].forEach(s => $(s).classList.toggle('hidden', s !== name));
+  setSkyView?.(name === 'working' ? 'dive' : name === 'result' ? 'read' : 'idle');
+  if (name !== 'intro') window.scrollTo({top:0, behavior:'smooth'});
+};
+
+$('pick').onclick  = () => $('file-pick').click();
+$('shoot').onclick = () => $('file-shoot').click();
+$('file-pick').onchange  = e => e.target.files[0] && read(e.target.files[0]);
+$('file-shoot').onchange = e => e.target.files[0] && read(e.target.files[0]);
+$('again').onclick = () => { $('file-pick').value=''; $('file-shoot').value=''; show('intro'); };
+
+let step = 0;
+function log(text, state){
+  const d = document.createElement('div');
+  d.className = state || 'wait';
+  d.textContent = text;
+  d.style.animationDelay = (step++ * 90) + 'ms';
+  $('status').appendChild(d);
+}
+
+async function read(file){
+  step = 0; $('status').innerHTML = '';
+  const url = URL.createObjectURL(file);
+  $('work-img').src = url; $('res-img').src = url;
+  show('working');
+
+  log('Frame loaded — ' + Math.round(file.size/1024) + ' KB', 'done');
+
+  try{
+    const {data, media} = await shrink(file);
+    log('Resized to 1024 px on the long edge', 'done');
+    log('Reading the field…');
+
+    const result = await classify(data, media, $('note').value.trim());
+    log('Field read', 'done');
+    await new Promise(r => setTimeout(r, 450));
+    render(result);
+  }catch(err){
+    console.error(err);
+    $('status').innerHTML = '';
+    render({summary:'', objects:[], error: err.title ? err : new Fault(
+      'Something broke mid-read', 'The page hit an error before it could show a result.', String(err.message || err))});
+  }
+}
+
+/* Downscale before upload — a 12 MP phone photo is ~8x more data than the read needs. */
+function shrink(file){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 1024, sc = Math.min(1, max/Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width*sc); c.height = Math.round(img.height*sc);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      resolve({data: c.toDataURL('image/jpeg', 0.85).split(',')[1], media:'image/jpeg'});
+    };
+    img.onerror = () => reject(new Error('decode failed'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+async function classify(base64, media, note){
+  const prompt =
+`You are identifying astronomical objects in a photograph of the night sky.
+
+${note ? 'The photographer notes: ' + note + '\n' : ''}
+Return ONLY a JSON object, no markdown fences and no preamble:
+{
+  "summary": "one plain sentence describing the frame overall",
+  "objects": [
+    {
+      "catalog": "short designation, e.g. M31, NGC 7000, Betelgeuse, Jupiter",
+      "common": "common name, or empty string",
+      "kind": "galaxy | nebula | cluster | star | planet | moon | other",
+      "x": 0.42, "y": 0.31,
+      "confidence": 0.0-1.0,
+      "detail": "one short line: morphology, magnitude, distance or size"
+    }
+  ]
+}
+
+Rules:
+- x and y are fractions of image width and height, top-left origin, marking the object's centre.
+- At most 7 objects, most confident first. Only include what you can actually see.
+- If the frame is not a sky photo, or nothing is identifiable, return an empty objects array.
+- Be honest with confidence. A smudge that might be Andromeda is 0.4, not 0.9.
+- Keep "detail" under 90 characters.`;
+
+  let res;
+  try{
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','anthropic-version':'2023-06-01'},
+      body: JSON.stringify({
+        model:'claude-sonnet-4-6', max_tokens:1000,
+        messages:[
+          {role:'user', content:[
+            {type:'image', source:{type:'base64', media_type:media, data:base64}},
+            {type:'text',  text:prompt}
+          ]},
+          // Prefill an opening brace so the reply starts as JSON, never as prose.
+          {role:'assistant', content:'{'}
+        ]
+      })
+    });
+  }catch(net){
+    throw new Fault('No route to the classifier',
+      'The request never left the page. This happens when the file is opened outside the Claude ' +
+      'artifact viewer — the API call is only proxied there.', String(net.message || net));
+  }
+
+  const raw = await res.text();
+  if (!res.ok){
+    throw new Fault('The classifier refused the frame (HTTP ' + res.status + ')',
+      res.status === 413 || res.status === 400
+        ? 'Usually the image is too large or the wrong format. Try a JPEG under 5 MB.'
+        : 'The API returned an error rather than a reading.', raw.slice(0, 400));
+  }
+
+  let text;
+  try{
+    const json = JSON.parse(raw);
+    text = '{' + json.content.filter(b => b.type === 'text').map(b => b.text).join('');
+    if (json.stop_reason === 'max_tokens') text = repair(text);
+  }catch(e){
+    throw new Fault('Unreadable response', 'The reply was not valid JSON.', raw.slice(0, 400));
+  }
+
+  try{
+    return JSON.parse(text.replace(/```json|```/g, '').trim());
+  }catch(e){
+    try{ return JSON.parse(repair(text)); }
+    catch(e2){
+      throw new Fault('The reading came back malformed',
+        'The model answered, but not in the shape this page expects.', text.slice(0, 400));
+    }
+  }
+}
+
+/* A truncated reply loses its closing brackets — close them and drop the partial object. */
+function repair(s){
+  s = s.replace(/```json|```/g, '').trim();
+  const cut = s.lastIndexOf('}');
+  if (cut === -1) return s;
+  s = s.slice(0, cut + 1);
+  let depth = 0, inStr = false, esc = false, close = '';
+  for (const ch of s){
+    if (inStr){ if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === '{' || ch === '[') { depth++; close = ch === '{' ? '}' + close : ']' + close; }
+    else if (ch === '}' || ch === ']') { depth--; close = close.slice(1); }
+  }
+  return s + close;
+}
+
+/* Carries a headline, a plain-English cause, and the raw detail for the disclosure. */
+function Fault(title, cause, detail){
+  this.title = title; this.cause = cause; this.detail = detail || '';
+}
+Fault.prototype = Object.create(Error.prototype);
+
+/* ---------- rendering the plate + the list ---------- */
+function render(data){
+  const objects = Array.isArray(data.objects) ? data.objects : [];
+  const plate = $('plate'), list = $('objects'), empty = $('empty-state');
+
+  plate.querySelectorAll('.marker').forEach(m => m.remove());
+  list.innerHTML = ''; empty.innerHTML = '';
+  $('summary').textContent = data.summary || '';
+
+  if (data.error){
+    const f = data.error;
+    $('caveat').textContent = '';
+    empty.innerHTML = `<div class="empty">
+      <h3>${esc(f.title)}</h3>
+      <p>${esc(f.cause)}</p>
+      ${f.detail ? `<details><summary>What the server said</summary><pre>${esc(f.detail)}</pre></details>` : ''}
+    </div>`;
+    show('result'); return;
+  }
+
+  if (!objects.length){
+    $('caveat').textContent = '';
+    empty.innerHTML = `<div class="empty">
+      <h3>No objects identified in this frame</h3>
+      <p>Deep-sky objects need a dark sky and a few seconds of exposure. If you shot handheld
+         in the city, try bracing the phone and using night mode, then send it again.</p></div>`;
+    show('result'); return;
+  }
+
+  $('caveat').textContent =
+    'These are estimates from an image model, not an astrometric plate solve. ' +
+    'Check anything that matters against a catalogue before you rely on it.';
+
+  objects.forEach((o, i) => {
+    const hue = KIND_COLOR[(o.kind||'other').toLowerCase()] || 'var(--k-other)';
+    const x = Math.max(0.02, Math.min(0.98, +o.x || 0.5));
+    const y = Math.max(0.02, Math.min(0.98, +o.y || 0.5));
+    const conf = Math.round((+o.confidence || 0) * 100);
+
+    // marker on the plate
+    const m = document.createElement('button');
+    m.className = 'marker' + (x > 0.62 ? ' flip' : '');
+    m.style.cssText = `left:${x*100}%;top:${y*100}%;color:${hue}`;
+    m.innerHTML = `<i></i><b>${esc(o.catalog || '?')}</b>`;
+    m.setAttribute('aria-label', `${o.catalog || 'object'} — ${o.kind || 'unclassified'}`);
+    plate.appendChild(m);
+
+    // row in the list
+    const row = document.createElement('button');
+    row.className = 'obj'; row.style.color = hue;
+    row.innerHTML = `
+      <div class="obj-top">
+        <span class="cat">${esc(o.catalog || '—')}</span>
+        <span class="common" style="color:var(--dim)">${esc(o.common || '')}</span>
+        <span class="kind">${esc(o.kind || 'other')}</span>
+      </div>
+      <div class="detail">${esc(o.detail || '')}</div>
+      <div class="conf"><span>CONF ${conf}%</span>
+        <span class="bar"><i style="width:${conf}%"></i></span></div>`;
+    list.appendChild(row);
+
+    const link = on => { m.classList.toggle('on', on); row.classList.toggle('on', on); };
+    row.onmouseenter = m.onmouseenter = () => link(true);
+    row.onmouseleave = m.onmouseleave = () => link(false);
+    row.onfocus = m.onfocus = () => link(true);
+    row.onblur  = m.onblur  = () => link(false);
+    row.onclick = m.onclick = () => link(!m.classList.contains('on'));
+  });
+
+  show('result');
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+</script>
